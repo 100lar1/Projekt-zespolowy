@@ -1,15 +1,13 @@
 <?php
+require_once 'core.php';
+
 // ✅ NAJPIERW session_start() - zanim jakiekolwiek output
 session_start();
 
-// ✅ POTEM nagłówki bezpieczeństwa
-include 'security_headers.php';
+
 setAuthPageHeaders();
 
-// ✅ POTEM includy
-include 'db.php';
-include 'csrf_protection.php';
-include 'password_security.php';
+
 
 function isValidPESEL($pesel) {
     if (!preg_match('/^[0-9]{11}$/', $pesel)) {

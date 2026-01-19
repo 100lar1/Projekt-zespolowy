@@ -1,108 +1,85 @@
 <?php
-include 'db.php';
+require_once 'core.php';
 
-// Bezpieczne pobranie tokenu z parametru GET
 $token = $_GET['token'] ?? '';
-$now = date("Y-m-d H:i:s");
+if (!$token) die("Brak tokenu lub błędny link.");
 
-// NAPRAWKA 1: Używanie prepared statements zamiast bezpośredniego wstawiania
-$stmt = $conn->prepare("SELECT * FROM vote_tokens WHERE token = ? AND used = 0 AND expires_at >= ?");
-$stmt->bind_param("ss", $token, $now);
+// Sprawdź ważność tokenu
+$stmt = $conn->prepare("SELECT vt.id, vt.election_id FROM vote_tokens vt WHERE vt.token = ? AND vt.used = 0 AND vt.expires_at > NOW()");
+$stmt->bind_param("s", $token);
 $stmt->execute();
-$token_data = $stmt->get_result()->fetch_assoc();
-$stmt->close();
+$res = $stmt->get_result();
 
-if (!$token_data) {
-    die("Token nieważny lub wygasł.");
+if ($res->num_rows === 0) {
+    die("<h3>Link do głosowania jest nieważny, wygasł lub głos został już oddany.</h3><a href='index.php'>Wróć na stronę główną</a>");
 }
 
-$election_id = $token_data["election_id"];
+$tokenData = $res->fetch_assoc();
+$electionId = $tokenData['election_id'];
+$tokenId = $tokenData['id'];
 
-// NAPRAWKA 2: Prepared statement dla pobrania kandydatów
-$stmt = $conn->prepare("SELECT * FROM candidates WHERE election_id = ?");
-$stmt->bind_param("i", $election_id);
-$stmt->execute();
-$candidates = $stmt->get_result();
-
-if ($_SERVER["REQUEST_METHOD"] === "POST") {
-    $candidate_id = $_POST["candidate_id"];
+// Obsługa oddania głosu
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $cid = (int)$_POST['candidate_id'];
     
-    // NAPRAWKA 3: Walidacja czy candidate_id jest liczbą i należy do wybranych wyborów
-    if (!is_numeric($candidate_id)) {
-        die("Nieprawidłowy ID kandydata.");
+    // Sprawdź czy kandydat należy do tych wyborów
+    $check = $conn->prepare("SELECT id FROM candidates WHERE id = ? AND election_id = ?");
+    $check->bind_param("ii", $cid, $electionId);
+    $check->execute();
+    
+    if ($check->get_result()->num_rows === 0) {
+        die("Nieprawidłowy kandydat.");
     }
     
-    $candidate_id = (int)$candidate_id;
-    
-    // Sprawdzenie czy kandydat należy do tych wyborów
-    $verify_stmt = $conn->prepare("SELECT id FROM candidates WHERE id = ? AND election_id = ?");
-    $verify_stmt->bind_param("ii", $candidate_id, $election_id);
-    $verify_stmt->execute();
-    $verify_result = $verify_stmt->get_result();
-    
-    if ($verify_result->num_rows === 0) {
-        die("Kandydat nie należy do tych wyborów.");
-    }
-    $verify_stmt->close();
-    
-    // NAPRAWKA 4: Bezpieczne aktualizowanie głosów i tokenów
+    // Transakcja: Zapisz głos + Oznacz token jako zużyty
     $conn->begin_transaction();
-    
     try {
-        // Aktualizacja głosów kandydata
-        $update_votes = $conn->prepare("UPDATE candidates SET votes = votes + 1 WHERE id = ?");
-        $update_votes->bind_param("i", $candidate_id);
-        $update_votes->execute();
-        
-        // Oznaczenie tokenu jako użytego
-        $update_token = $conn->prepare("UPDATE vote_tokens SET used = 1 WHERE id = ?");
-        $update_token->bind_param("i", $token_data["id"]);
-        $update_token->execute();
-        
+        $conn->query("UPDATE candidates SET votes = votes + 1 WHERE id = $cid");
+        $conn->query("UPDATE vote_tokens SET used = 1 WHERE id = $tokenId");
         $conn->commit();
-        $message = "Głos został oddany pomyślnie!";
-        
+        $message = "Twój głos został oddany pomyślnie! Dziękujemy.";
+        $tokenData = null; // Blokuje ponowne wyświetlenie formularza
     } catch (Exception $e) {
         $conn->rollback();
-        error_log("Voting error: " . $e->getMessage());
-        die("Wystąpił błąd podczas głosowania. Spróbuj ponownie.");
+        die("Wystąpił błąd systemu. Proszę spróbować ponownie.");
     }
 }
+
+// Pobierz listę kandydatów
+$cands = $conn->prepare("SELECT * FROM candidates WHERE election_id = ?");
+$cands->bind_param("i", $electionId);
+$cands->execute();
+$candidates = $cands->get_result();
 ?>
 <!DOCTYPE html>
 <html lang="pl">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Głosowanie</title>
+    <title>Karta do głosowania</title>
     <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-
-<h2>Głosowanie</h2>
-
-<div class="container">
-    <?php if (isset($message)): ?>
-        <div class="message">
-            <?= htmlspecialchars($message, ENT_QUOTES, 'UTF-8') ?>
-        </div>
-        <a href="dashboard.php" class="back-button">Powrót do panelu</a>
-    <?php else: ?>
-        <h3>Wybierz kandydata:</h3>
-        <form method="POST" class="vote-form">
-            <?php 
-            // Reset pointer do początku wyniku
-            $candidates->data_seek(0);
-            while ($c = $candidates->fetch_assoc()): ?>
-                <div>
-                    <input type="radio" id="candidate_<?= $c['id'] ?>" name="candidate_id" value="<?= $c['id'] ?>" required>
-                    <label for="candidate_<?= $c['id'] ?>"><?= htmlspecialchars($c['name'], ENT_QUOTES, 'UTF-8') ?></label>
-                </div>
-            <?php endwhile; ?>
-            <button type="submit">Oddaj głos</button>
-        </form>
-    <?php endif; ?>
-</div>
-
+    <div class="container">
+        <h2>Karta do głosowania</h2>
+        <?php if (isset($message)): ?>
+            <div class="message success"><?= $message ?></div>
+            <a href="index.php">Wróć na stronę główną</a>
+        <?php elseif ($tokenData): ?>
+            <form method="POST">
+                <p>Wybierz kandydata z listy:</p>
+                <?php while($c = $candidates->fetch_assoc()): ?>
+                    <div style="margin: 10px 0; padding: 10px; border: 1px solid #eee; border-radius: 5px;">
+                        <label style="display:block; cursor:pointer;">
+                            <input type="radio" name="candidate_id" value="<?= $c['id'] ?>" required>
+                            <span style="font-weight:bold; font-size:1.1em;"><?= htmlspecialchars($c['name']) ?></span>
+                            <br>
+                            <small style="color:#666; margin-left: 25px;"><?= htmlspecialchars($c['description']) ?></small>
+                        </label>
+                    </div>
+                <?php endwhile; ?>
+                <button type="submit">ODDAJ GŁOS</button>
+            </form>
+        <?php endif; ?>
+    </div>
 </body>
 </html>

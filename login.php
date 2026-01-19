@@ -5,13 +5,7 @@
 // ✅ NAJPIERW session_start()
 session_start();
 
-// ✅ POTEM nagłówki bezpieczeństwa  
-include 'security_headers.php';
-setAuthPageHeaders();
 
-// ✅ POTEM includy
-include 'db.php';
-include 'csrf_protection.php';
 
 // ✅ Sprawdzenie CSRF dla POST requestów
 checkCSRFOrDie();
