@@ -1,6 +1,6 @@
 <?php
 require_once 'core.php';
-
+ 
 $token = $_GET['token'] ?? '';
 if (!$token) die("Brak tokenu lub błędny link.");
 
