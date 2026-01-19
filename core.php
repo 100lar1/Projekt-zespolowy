@@ -1,85 +1,133 @@
 <?php
-require_once 'core.php';
+// core.php - Serce systemu (Baza, Sesje, Bezpieczeństwo)
 
-function isValidPESEL($pesel) {
-    if (!preg_match('/^[0-9]{11}$/', $pesel)) return false;
-    $weights = [1, 3, 7, 9, 1, 3, 7, 9, 1, 3];
-    $sum = 0;
-    for ($i = 0; $i < 10; $i++) $sum += $weights[$i] * intval($pesel[$i]);
-    $checkDigit = (10 - ($sum % 10)) % 10;
-    return $checkDigit == intval($pesel[10]);
+// 1. Inicjalizacja sesji (jeśli nie wystartowała)
+if (session_status() === PHP_SESSION_NONE) {
+    ini_set('session.cookie_httponly', 1);
+    ini_set('session.use_strict_mode', 1);
+    session_start();
 }
 
-$errors = [];
-$success = '';
+// 2. Konfiguracja i Baza Danych
+// Wyłącz wyświetlanie błędów użytkownikowi na produkcji
+error_reporting(E_ALL & ~E_NOTICE & ~E_DEPRECATED);
+ini_set('display_errors', 0); // Zmień na 1 tylko w trybie deweloperskim
 
-checkCSRFOrDie();
+// Dane do bazy - pobierane ze zmiennych środowiskowych (lub domyślne dla deweloperki)
+$host = getenv('MYSQL_HOST') ?: 'mysql';
+$user = getenv('MYSQL_USER') ?: 'user';
+$pass = getenv('MYSQL_PASSWORD') ?: 'password';
+$dbname = getenv('MYSQL_DATABASE') ?: 'moja_baza';
 
-if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    $name = trim($_POST["name"]);
-    $surname = trim($_POST["surname"]);
-    $pesel = trim($_POST["pesel"]);
-    $email = trim($_POST["email"]);
-    $password = $_POST["password"];
-    $confirm = $_POST["confirm_password"];
-    
-    if (!isValidPESEL($pesel)) $errors[] = "Nieprawidłowy PESEL";
-    if ($password !== $confirm) $errors[] = "Hasła nie są identyczne";
-    
-    $val = PasswordSecurity::validatePassword($password);
-    if (!$val['valid']) $errors = array_merge($errors, $val['errors']);
-    
-    // Sprawdź duplikaty
-    if (empty($errors)) {
-        $stmt = $conn->prepare("SELECT id FROM users WHERE pesel = ? OR email = ?");
-        $stmt->bind_param("ss", $pesel, $email);
-        $stmt->execute();
-        if ($stmt->get_result()->num_rows > 0) $errors[] = "Użytkownik już istnieje.";
+try {
+    $conn = new mysqli($host, $user, $pass, $dbname);
+    $conn->set_charset("utf8mb4");
+    if ($conn->connect_error) {
+        throw new Exception("Connection failed: " . $conn->connect_error);
     }
-    
-    if (empty($errors)) {
-        $hash = PasswordSecurity::hashPassword($password);
-        $stmt = $conn->prepare("INSERT INTO users (name, surname, pesel, email, password_hash) VALUES (?, ?, ?, ?, ?)");
-        $stmt->bind_param("sssss", $name, $surname, $pesel, $email, $hash);
-        
-        if ($stmt->execute()) {
-            $success = "Konto utworzone! <a href='login.php'>Zaloguj się</a>";
-        } else {
-            $errors[] = "Błąd bazy danych.";
+} catch (Exception $e) {
+    // Loguj błąd do pliku serwera
+    error_log("DB Error: " . $e->getMessage());
+    die("Wystąpił błąd systemu. Proszę spróbować później.");
+}
+
+// 3. Nagłówki Bezpieczeństwa
+if (!headers_sent()) {
+    header("X-Frame-Options: DENY");
+    header("X-Content-Type-Options: nosniff");
+    header("X-XSS-Protection: 1; mode=block");
+    // CSP: Dostosowane do Chart.js i stylów inline
+    $csp = "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none';";
+    header("Content-Security-Policy: " . $csp);
+}
+
+// 4. Ochrona CSRF - TE FUNKCJE BYŁY BRAKUJĄCE
+function generateCSRFToken() {
+    if (empty($_SESSION['csrf_token'])) {
+        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+    }
+    return $_SESSION['csrf_token'];
+}
+
+function checkCSRFOrDie() {
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        if (!isset($_POST['csrf_token']) || !hash_equals($_SESSION['csrf_token'] ?? '', $_POST['csrf_token'])) {
+            http_response_code(403);
+            die('Błąd bezpieczeństwa CSRF. Token jest nieprawidłowy lub wygasł. Odśwież stronę i spróbuj ponownie.');
         }
     }
 }
+
+function getCSRFInput() {
+    $token = generateCSRFToken();
+    return '<input type="hidden" name="csrf_token" value="' . htmlspecialchars($token) . '">';
+}
+
+// 5. Rate Limiting (Ochrona przed Brute Force)
+function checkLoginAttempts($conn, $ip) {
+    // Utwórz tabelę, jeśli nie istnieje (dla uproszczenia wdrożenia)
+    $conn->query("CREATE TABLE IF NOT EXISTS login_attempts (id INT AUTO_INCREMENT PRIMARY KEY, ip_address VARCHAR(45), attempt_time DATETIME)");
+    
+    // Usuń stare wpisy (> 15 min)
+    $conn->query("DELETE FROM login_attempts WHERE attempt_time < NOW() - INTERVAL 15 MINUTE");
+    
+    // Sprawdź liczbę prób
+    $stmt = $conn->prepare("SELECT COUNT(*) FROM login_attempts WHERE ip_address = ?");
+    $stmt->bind_param("s", $ip);
+    $stmt->execute();
+    $count = 0;
+    $stmt->bind_result($count);
+    $stmt->fetch();
+    $stmt->close();
+    
+    return $count < 5; // Max 5 prób na 15 minut
+}
+
+function logFailedLogin($conn, $ip) {
+    $stmt = $conn->prepare("INSERT INTO login_attempts (ip_address, attempt_time) VALUES (?, NOW())");
+    $stmt->bind_param("s", $ip);
+    $stmt->execute();
+    $stmt->close();
+}
+
+// 6. Bezpieczeństwo Haseł
+class PasswordSecurity {
+    public static function validatePassword($password) {
+        $errors = [];
+        if (strlen($password) < 8) $errors[] = "Hasło musi mieć min. 8 znaków";
+        if (!preg_match('/[A-Z]/', $password)) $errors[] = "Wymagana wielka litera";
+        if (!preg_match('/[a-z]/', $password)) $errors[] = "Wymagana mała litera";
+        if (!preg_match('/[0-9]/', $password)) $errors[] = "Wymagana cyfra";
+        if (!preg_match('/[^a-zA-Z0-9]/', $password)) $errors[] = "Wymagany znak specjalny";
+        
+        return ['valid' => empty($errors), 'errors' => $errors];
+    }
+
+    public static function hashPassword($password) {
+        return password_hash($password, PASSWORD_ARGON2ID);
+    }
+
+    public static function verifyPassword($password, $hash) {
+        return password_verify($password, $hash);
+    }
+    
+    // JS helper do walidacji w przeglądarce
+    public static function getClientSideValidationJS() {
+        return "
+        function validatePasswordStrength(password) {
+            let errors = [];
+            if(password.length < 8) errors.push('Min. 8 znaków');
+            if(!/[A-Z]/.test(password)) errors.push('Brak wielkiej litery');
+            if(!/[a-z]/.test(password)) errors.push('Brak małej litery');
+            if(!/[0-9]/.test(password)) errors.push('Brak cyfry');
+            return errors;
+        }";
+    }
+    public static function getPasswordStrengthCSS() { return ""; }
+}
+
+// Funkcja pomocnicza dla kompatybilności
+function ensureSession() {
+    if (session_status() === PHP_SESSION_NONE) session_start();
+}
 ?>
-<!DOCTYPE html>
-<html lang="pl">
-<head>
-    <meta charset="UTF-8">
-    <title>Rejestracja</title>
-    <link rel="stylesheet" href="css/style.css">
-</head>
-<body>
-    <div class="container">
-        <h2>Rejestracja</h2>
-        <?php if ($errors): ?>
-            <div class="message error">
-                <ul><?php foreach($errors as $e) echo "<li>$e</li>"; ?></ul>
-            </div>
-        <?php endif; ?>
-        <?php if ($success): ?>
-            <div class="message success"><?= $success ?></div>
-        <?php else: ?>
-            <form method="POST">
-                <?= getCSRFInput() ?>
-                <label>Imię:</label><input type="text" name="name" required>
-                <label>Nazwisko:</label><input type="text" name="surname" required>
-                <label>PESEL:</label><input type="text" name="pesel" required maxlength="11">
-                <label>Email:</label><input type="email" name="email" required>
-                <label>Hasło:</label><input type="password" name="password" required>
-                <label>Potwierdź hasło:</label><input type="password" name="confirm_password" required>
-                <button type="submit">Zarejestruj się</button>
-            </form>
-        <?php endif; ?>
-        <p><a href="login.php">Powrót do logowania</a></p>
-    </div>
-</body>
-</html>
