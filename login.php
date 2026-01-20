@@ -1,52 +1,51 @@
 <?php
 require_once 'core.php';
 
-function isValidPESEL($pesel) {
-    if (!preg_match('/^[0-9]{11}$/', $pesel)) return false;
-    $weights = [1, 3, 7, 9, 1, 3, 7, 9, 1, 3];
-    $sum = 0;
-    for ($i = 0; $i < 10; $i++) $sum += $weights[$i] * intval($pesel[$i]);
-    $checkDigit = (10 - ($sum % 10)) % 10;
-    return $checkDigit == intval($pesel[10]);
+// Ochrona przed Brute Force
+$ip = $_SERVER['REMOTE_ADDR'];
+if (!checkLoginAttempts($conn, $ip)) {
+    die("Zbyt wiele nieudanych prób logowania. Spróbuj ponownie za 15 minut.");
 }
-
-$errors = [];
-$success = '';
 
 checkCSRFOrDie();
 
+$error = '';
+
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    $name = trim($_POST["name"]);
-    $surname = trim($_POST["surname"]);
-    $pesel = trim($_POST["pesel"]);
-    $email = trim($_POST["email"]);
+    $login_input = trim($_POST["login_input"]);
     $password = $_POST["password"];
-    $confirm = $_POST["confirm_password"];
     
-    if (!isValidPESEL($pesel)) $errors[] = "Nieprawidłowy PESEL";
-    if ($password !== $confirm) $errors[] = "Hasła nie są identyczne";
-    
-    $val = PasswordSecurity::validatePassword($password);
-    if (!$val['valid']) $errors = array_merge($errors, $val['errors']);
-    
-    // Sprawdź duplikaty
-    if (empty($errors)) {
-        $stmt = $conn->prepare("SELECT id FROM users WHERE pesel = ? OR email = ?");
-        $stmt->bind_param("ss", $pesel, $email);
+    if (empty($login_input) || empty($password)) {
+        $error = "Dane logowania są wymagane.";
+    } else {
+        // Sprawdzamy PESEL lub nazwę admina
+        $stmt = $conn->prepare("SELECT id, name, surname, pesel, password_hash, is_admin, admin_username FROM users WHERE pesel = ? OR admin_username = ?");
+        $stmt->bind_param("ss", $login_input, $login_input);
         $stmt->execute();
-        if ($stmt->get_result()->num_rows > 0) $errors[] = "Użytkownik już istnieje.";
-    }
-    
-    if (empty($errors)) {
-        $hash = PasswordSecurity::hashPassword($password);
-        $stmt = $conn->prepare("INSERT INTO users (name, surname, pesel, email, password_hash, is_admin) VALUES (?, ?, ?, ?, ?, 0)");
-        $stmt->bind_param("sssss", $name, $surname, $pesel, $email, $hash);
+        $result = $stmt->get_result();
         
-        if ($stmt->execute()) {
-            $success = "Konto utworzone! <a href='login.php'>Zaloguj się</a>";
-        } else {
-            $errors[] = "Błąd bazy danych.";
+        if ($result->num_rows === 1) {
+            $user = $result->fetch_assoc();
+            if (PasswordSecurity::verifyPassword($password, $user['password_hash'])) {
+                // Logowanie udane
+                $_SESSION['user_id'] = $user['id'];
+                $_SESSION['is_admin'] = $user['is_admin'];
+                $_SESSION['admin_username'] = $user['admin_username'];
+                $_SESSION['user_name'] = $user['name'];
+                
+                // Przekierowanie
+                if ($user['is_admin']) {
+                    header("Location: admin_panel.php");
+                } else {
+                    header("Location: dashboard.php");
+                }
+                exit;
+            }
         }
+        
+        // Logowanie nieudane
+        logFailedLogin($conn, $ip);
+        $error = "Nieprawidłowe dane logowania.";
     }
 }
 ?>
@@ -54,32 +53,28 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
 <html lang="pl">
 <head>
     <meta charset="UTF-8">
-    <title>Rejestracja</title>
+    <title>Logowanie</title>
     <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
     <div class="container">
-        <h2>Rejestracja</h2>
-        <?php if ($errors): ?>
-            <div class="message error">
-                <ul><?php foreach($errors as $e) echo "<li>$e</li>"; ?></ul>
-            </div>
+        <h2>Logowanie</h2>
+        <form method="POST">
+            <?= getCSRFInput() ?>
+            <label>PESEL lub Login Admina:</label>
+            <input type="text" name="login_input" required>
+            <label>Hasło:</label>
+            <input type="password" name="password" required>
+            <button type="submit">Zaloguj się</button>
+        </form>
+        
+        <?php if ($error): ?>
+            <div class="message error"><?= htmlspecialchars($error) ?></div>
         <?php endif; ?>
-        <?php if ($success): ?>
-            <div class="message success"><?= $success ?></div>
-        <?php else: ?>
-            <form method="POST">
-                <?= getCSRFInput() ?>
-                <label>Imię:</label><input type="text" name="name" required>
-                <label>Nazwisko:</label><input type="text" name="surname" required>
-                <label>PESEL:</label><input type="text" name="pesel" required maxlength="11">
-                <label>Email:</label><input type="email" name="email" required>
-                <label>Hasło:</label><input type="password" name="password" required>
-                <label>Potwierdź hasło:</label><input type="password" name="confirm_password" required>
-                <button type="submit">Zarejestruj się</button>
-            </form>
-        <?php endif; ?>
-        <p><a href="login.php">Powrót do logowania</a></p>
+        
+        <p style="text-align:center">
+            <a href="register.php">Zarejestruj się</a> | <a href="index.php">Strona główna</a>
+        </p>
     </div>
 </body>
 </html>
