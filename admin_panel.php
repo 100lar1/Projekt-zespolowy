@@ -27,7 +27,6 @@ if (isset($_POST['add_candidate'])) {
 
 if (isset($_POST['promote_user'])) {
     $uid = (int)$_POST['user_id'];
-    // Prosta logika promocji (w core.php można by to wydzielić, ale tu też ok)
     $conn->query("UPDATE users SET is_admin=1, admin_username=CONCAT('admin', id) WHERE id=$uid");
     $success = "Awansowano.";
 }
