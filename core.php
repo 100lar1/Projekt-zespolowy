@@ -104,14 +104,3 @@ function logFailedLogin($conn, $ip) {
 function ensureSession() { if(session_status() === PHP_SESSION_NONE) session_start(); }
 ?>
 ```
-
-### KROK 2: Wymuszenie aktualizacji plików w Dockerze
-
-Skoro błąd nadal występuje, oznacza to, że Docker nie "widzi" zmian w pliku. Wykonaj poniższe polecenia w terminalu (w folderze projektu), aby zmusić go do przebudowania obrazu i odświeżenia plików:
-
-```bash
-# 1. Zatrzymaj i usuń stare kontenery (wraz z obrazami)
-docker-compose down --rmi all -v
-
-# 2. Przebuduj i uruchom ponownie (wymusi skopiowanie nowych plików do obrazu)
-docker-compose up -d --build
