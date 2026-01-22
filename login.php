@@ -1,5 +1,25 @@
 <?php
+// Enable error reporting to diagnose issues
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
+
 require_once 'core.php';
+
+// --- POLYFILLS (Safety net if core.php is not updated) ---
+if (!function_exists('ensureSession')) {
+    function ensureSession() { if(session_status() === PHP_SESSION_NONE) session_start(); }
+}
+if (!function_exists('isLoggedIn')) {
+    function isLoggedIn() { return isset($_SESSION['user_id']); }
+}
+if (!function_exists('isAdmin')) {
+    function isAdmin() { return isset($_SESSION['is_admin']) && $_SESSION['is_admin']; }
+}
+if (!function_exists('redirectTo')) {
+    function redirectTo($url) { header("Location: " . $url); exit; }
+}
+// ---------------------------------------------------------
 
 // Ensure session is active
 ensureSession();
@@ -13,17 +33,21 @@ if (isLoggedIn()) {
     }
 }
 
-// Brute Force Protection
+// Brute Force Protection (Only if function exists in core.php)
 $ip = $_SERVER['REMOTE_ADDR'];
-if (!checkLoginAttempts($conn, $ip)) {
-    die("Too many failed login attempts. Please try again in 15 minutes.");
+if (function_exists('checkLoginAttempts')) {
+    if (!checkLoginAttempts($conn, $ip)) {
+        die("Too many failed login attempts. Please try again in 15 minutes.");
+    }
 }
 
 $error = '';
 
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    // Verify CSRF token
-    checkCSRFOrDie();
+    // Verify CSRF token (Only if function exists)
+    if (function_exists('checkCSRFOrDie')) {
+        checkCSRFOrDie();
+    }
     
     $login_input = trim($_POST["login_input"] ?? '');
     $password = $_POST["password"] ?? '';
@@ -32,11 +56,12 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         $error = "Login and password are required.";
     } else {
         // Query looking for PESEL OR admin_username
+        // Note: 'admin_username' column must exist in your 'users' table!
         $stmt = $conn->prepare("SELECT id, name, surname, pesel, password_hash, is_admin, admin_username FROM users WHERE pesel = ? OR admin_username = ?");
         
         if (!$stmt) {
-            error_log("SQL prepare error: " . $conn->error);
-            $error = "System error. Please try again later.";
+            // Show actual SQL error for debugging (remove in production)
+            $error = "Database Error: " . $conn->error; 
         } else {
             // Bind the same input twice (once for pesel, once for username)
             $stmt->bind_param("ss", $login_input, $login_input);
@@ -67,13 +92,13 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                     }
                 } else {
                     // Wrong password
-                    logFailedLogin($conn, $ip);
-                    $error = "Invalid login credentials.";
+                    if (function_exists('logFailedLogin')) logFailedLogin($conn, $ip);
+                    $error = "Invalid login credentials (Password mismatch).";
                 }
             } else {
                 // User not found
-                logFailedLogin($conn, $ip);
-                $error = "Invalid login credentials.";
+                if (function_exists('logFailedLogin')) logFailedLogin($conn, $ip);
+                $error = "Invalid login credentials (User not found).";
             }
             
             $stmt->close();
@@ -98,9 +123,9 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         <?php endif; ?>
         
         <form method="POST" action="login.php">
-            <?= getCSRFInput() ?>
+            <?php if(function_exists('getCSRFInput')) echo getCSRFInput(); ?>
             
-            <label for="login_input">PESEL lub Login Admina:</label>
+            <label for="login_input">Login :</label>
             <input type="text" id="login_input" name="login_input" required autocomplete="username">
             
             <label for="password">Hasło:</label>
